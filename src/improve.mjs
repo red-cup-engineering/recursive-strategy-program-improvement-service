@@ -1,6 +1,6 @@
 const NI = /^ni:\/\/\/sha-256;[A-Za-z0-9_-]{43}$/u;
 function validateRequest(request) {
-  if (!NI.test(request?.incumbent?.id) || !NI.test(request?.contextProduct) || !NI.test(request?.acceptanceSuite)) throw new TypeError("immutable-evolution-inputs-required");
+  if (!NI.test(request?.incumbent?.id) || !NI.test(request?.contextProduct) || !NI.test(request?.acceptanceSuite) || !NI.test(request?.originalWork)) throw new TypeError("immutable-evolution-inputs-required");
   if (!Number.isInteger(request.maximumGenerations) || request.maximumGenerations < 1 || request.maximumGenerations > 100 || !Number.isInteger(request.populationSize) || request.populationSize < 1 || request.populationSize > 16) throw new TypeError("bounded-evolution-mandate-required");
   if (!Array.isArray(request.evidenceFacts) || !Array.isArray(request.allowedFeatureDependencies) || !Array.isArray(request.failureHistory)) throw new TypeError("typed-evolution-context-required");
 }
@@ -9,15 +9,47 @@ function validateTournament(result, evaluations) {
   if (result.improvementEstablished && (!Number.isInteger(result.winnerIndex) || !evaluations.some(({ index }) => index === result.winnerIndex))) throw new TypeError("tournament-winner-binding-invalid");
 }
 
+// Research-method selection consumes the *existing* Organizing Work reading.
+// Its trusted host obtains this array from Organizing.standingOutcomes over
+// authenticated original custody. A caller-supplied historical outcome, a
+// paper review, or a provider's claimed score is not a source-qualified read.
+// This pure consumer cannot authenticate the host, Work rights or Science.
+function originalWorkReceiving(standing, request, winner, usedOutcomes, usedLots) {
+  if (!Array.isArray(standing) || standing.length > 10_000) throw new TypeError("original-work-standing-read-required");
+  const matches = standing.filter(row => row && row.kind === "organizing.enterprise.outcome"
+    && row.source === "work-discharge"
+    && Array.isArray(row.evidence) && row.evidence.includes(request.originalWork)
+    && row.evidence.includes(winner.assay.source));
+  if (matches.length !== 1) return { refusal: matches.length ? "contested-original-work" : "original-work-not-received" };
+  const work = matches[0];
+  if (work.version !== 1 || work.verdict !== "accepted" || !NI.test(work.id)
+      || typeof work.lot !== "string" || !work.lot
+      || typeof work.delivery !== "string" || !work.delivery
+      || typeof work.provider !== "string" || !work.provider
+      || typeof work.judge !== "string" || !work.judge
+      || work.judge === work.provider || work.judge === winner.authorActor
+      || !NI.test(work.receivingReceipt) || !NI.test(work.receivingAuthorizationReceipt)
+      || work.reportedResult?.kind !== "skill-result") {
+    return { refusal: "unqualified-original-work" };
+  }
+  if (usedOutcomes.has(work.id) || usedLots.has(work.lot)) return { refusal: "original-work-already-credited" };
+  usedOutcomes.add(work.id); usedLots.add(work.lot);
+  return { received: Object.freeze({
+    outcome: work.id, lot: work.lot, delivery: work.delivery,
+    judge: work.judge, receiver: work.receivingAuthorizationReceipt,
+    originalWork: request.originalWork,
+  }) };
+}
+
 export function createRecursiveStrategyProgramImprovement(providers) {
-  const required = ["synthesizePopulation", "assayProgram", "replayProgram", "evaluateProgram", "selectTournamentWinner", "reviewProgram", "recordGeneration", "promotePaperProgram"];
+  const required = ["synthesizePopulation", "assayProgram", "replayProgram", "evaluateProgram", "selectTournamentWinner", "reviewProgram", "recordGeneration", "promotePaperProgram", "readStandingOutcomes"];
   if (required.some((key) => typeof providers?.[key] !== "function")) throw new TypeError("explicit-evolution-providers-required");
   return async function improve(request) {
     validateRequest(request);
     const started = Date.now(), maximumWallClockMs = request.maximumWallClockMs ?? 3_600_000;
     if (!Number.isInteger(maximumWallClockMs) || maximumWallClockMs < 1_000 || maximumWallClockMs > 86_400_000) throw new TypeError("evolution-wall-clock-bound-invalid");
     let incumbent = Object.freeze({ ...request.incumbent }), failureHistory = [...request.failureHistory];
-    const generations = [];
+    const generations = [], usedWorkOutcomes = new Set(), usedWorkLots = new Set(), receivedWork = [];
     for (let generation = 0; generation < request.maximumGenerations; generation += 1) {
       if (Date.now() - started >= maximumWallClockMs) break;
       const population = await providers.synthesizePopulation({
@@ -70,16 +102,40 @@ export function createRecursiveStrategyProgramImprovement(providers) {
         if (review?.approved !== true || review.reviewerActor === winner.authorActor) {
           residues.push(Object.freeze({ index: winner.index, disposition: "independent-review-refusal" }));
         } else {
-          successor = Object.freeze({
-            id: winner.assay.source,
-            source: winner.authored.candidate.strategySource,
-            authorActor: winner.authorActor,
-            parent: incumbent.id,
-            generation,
-            evaluation: winner.evaluation,
-            tournament,
-            review
-          });
+          // A tournament and peer review are proposal evidence. Only the
+          // original Work source's *current standing* can advance the lineage.
+          // Do not build a second outcome ledger or infer Work discharge from
+          // mere approval of a producer's result.
+          let qualified;
+          try {
+            const standing = await providers.readStandingOutcomes({
+              originalWork: request.originalWork, candidateSource: winner.assay.source,
+              incumbent: incumbent.id, contextProduct: request.contextProduct,
+              acceptanceSuite: request.acceptanceSuite, generation
+            });
+            qualified = originalWorkReceiving(standing, request, winner, usedWorkOutcomes, usedWorkLots);
+          } catch (error) {
+            qualified = { refusal: "original-work-source-refused", reason: String(error?.message ?? error) };
+          }
+          if (!qualified.received) {
+            residues.push(Object.freeze({
+              index: winner.index, disposition: qualified.refusal,
+              ...(qualified.reason === undefined ? {} : { reason: qualified.reason })
+            }));
+          } else {
+            receivedWork.push(qualified.received);
+            successor = Object.freeze({
+              id: winner.assay.source,
+              source: winner.authored.candidate.strategySource,
+              authorActor: winner.authorActor,
+              parent: incumbent.id,
+              generation,
+              evaluation: winner.evaluation,
+              tournament,
+              review,
+              originalWorkReceiving: qualified.received,
+            });
+          }
         }
       }
       const generationRecord = await providers.recordGeneration({
@@ -91,15 +147,22 @@ export function createRecursiveStrategyProgramImprovement(providers) {
       failureHistory = failureHistory.concat(residues.map(({ disposition, reason }) => `${disposition}:${reason ?? "recorded"}`)).slice(-128);
       if (successor) incumbent = successor;
     }
-    const promotion = await providers.promotePaperProgram({
+    // No received replacement means no new paper promotion. Merely running
+    // the generator must not republish the starting program as an advance.
+    const changed = receivedWork.length > 0;
+    const promotion = changed ? await providers.promotePaperProgram({
       candidate: incumbent,
       originalIncumbent: request.incumbent.id,
       generations,
       contextProduct: request.contextProduct,
       acceptanceSuite: request.acceptanceSuite,
+      originalWork: request.originalWork,
+      receivedWork: Object.freeze([...receivedWork]),
       liveReadinessEstablished: false
-    });
-    if (promotion?.paperPromotionEstablished !== true || promotion.liveReadinessEstablished !== false || promotion.candidate !== incumbent.id) throw new TypeError("paper-promotion-certificate-invalid");
+    }) : null;
+    if (changed && (promotion?.paperPromotionEstablished !== true ||
+      promotion.liveReadinessEstablished !== false || promotion.candidate !== incumbent.id))
+      throw new TypeError("paper-promotion-certificate-invalid");
     return Object.freeze({
       type: "RecursiveStrategyProgramImprovementResult",
       version: 1,
@@ -107,6 +170,8 @@ export function createRecursiveStrategyProgramImprovement(providers) {
       lineageHead: incumbent.id,
       generations: Object.freeze(generations),
       promotion,
+      receivedWork: Object.freeze([...receivedWork]),
+      scientificImprovementEstablished: null,
       orderExecutionEstablished: false,
       liveReadinessEstablished: false,
       effect: "paper-strategy-program-lineage-only"
