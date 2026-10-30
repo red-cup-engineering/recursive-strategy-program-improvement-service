@@ -14,12 +14,14 @@ function validateTournament(result, evaluations) {
 // authenticated original custody. A caller-supplied historical outcome, a
 // paper review, or a provider's claimed score is not a source-qualified read.
 // This pure consumer cannot authenticate the host, Work rights or Science.
-function originalWorkReceiving(standing, request, winner, usedOutcomes, usedLots) {
+function originalWorkReceiving(standing, request, winner, incumbent, usedOutcomes, usedLots) {
   if (!Array.isArray(standing) || standing.length > 10_000) throw new TypeError("original-work-standing-read-required");
   const matches = standing.filter(row => row && row.kind === "organizing.enterprise.outcome"
     && row.source === "work-discharge"
     && Array.isArray(row.evidence) && row.evidence.includes(request.originalWork)
-    && row.evidence.includes(winner.assay.source));
+    && row.evidence.includes(winner.assay.source)
+    && row.evidence.includes(incumbent.id)
+    && row.evidence.includes(request.acceptanceSuite));
   if (matches.length !== 1) return { refusal: matches.length ? "contested-original-work" : "original-work-not-received" };
   const work = matches[0];
   if (work.version !== 1 || work.verdict !== "accepted" || !NI.test(work.id)
@@ -99,7 +101,8 @@ export function createRecursiveStrategyProgramImprovement(providers) {
           evaluation: winner.evaluation,
           tournament
         });
-        if (review?.approved !== true || review.reviewerActor === winner.authorActor) {
+        if (review?.approved !== true || typeof review.reviewerActor !== "string"
+            || !review.reviewerActor.trim() || review.reviewerActor === winner.authorActor) {
           residues.push(Object.freeze({ index: winner.index, disposition: "independent-review-refusal" }));
         } else {
           // A tournament and peer review are proposal evidence. Only the
@@ -108,12 +111,13 @@ export function createRecursiveStrategyProgramImprovement(providers) {
           // mere approval of a producer's result.
           let qualified;
           try {
+            if (!NI.test(winner.assay.source)) throw new TypeError("unaddressed-strategy-source");
             const standing = await providers.readStandingOutcomes({
               originalWork: request.originalWork, candidateSource: winner.assay.source,
               incumbent: incumbent.id, contextProduct: request.contextProduct,
               acceptanceSuite: request.acceptanceSuite, generation
             });
-            qualified = originalWorkReceiving(standing, request, winner, usedWorkOutcomes, usedWorkLots);
+            qualified = originalWorkReceiving(standing, request, winner, incumbent, usedWorkOutcomes, usedWorkLots);
           } catch (error) {
             qualified = { refusal: "original-work-source-refused", reason: String(error?.message ?? error) };
           }
