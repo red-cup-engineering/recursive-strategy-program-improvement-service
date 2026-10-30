@@ -21,14 +21,14 @@ const received = (overrides = {}) => ({
   reportedResult: { kind: "skill-result", value: { tested: true } },
   ...overrides,
 });
-function fixture({ read = async () => [], approval = true, winner = true, reviewerActor = "urn:reviewer:other", assaySource = ni("d") } = {}) {
+function fixture({ read = async () => [], approval = true, winner = true, reviewerActor = "urn:reviewer:other", assaySource = ni("d"), programs = [source] } = {}) {
   const calls = { reads: [], promotions: [], generations: [] };
   const providers = {
-    synthesizePopulation: async () => ({
-      candidates: [{ index: 0, provider: "urn:author:one", candidate: { strategySource: source } }],
+    synthesizePopulation: async ({ generation }) => ({
+      candidates: [{ index: 0, provider: "urn:author:one", candidate: { strategySource: programs[generation] ?? source } }],
       residues: [],
     }),
-    assayProgram: async () => ({ type: "StrategyProgramStaticAssay", source: assaySource, admitted: true }),
+    assayProgram: async ({ source: selected }) => ({ type: "StrategyProgramStaticAssay", source: selected === source ? assaySource : ni("m"), admitted: true }),
     replayProgram: async () => ({ type: "DeterministicStrategyProgramReplay", output: { scores: { BLK: 1 } } }),
     evaluateProgram: async () => ({ type: "PurgedMultiRegimeEvaluation", holdoutScore: 1 }),
     selectTournamentWinner: async () => ({
@@ -102,7 +102,12 @@ test("revoked, contested, self-judged, failed and wrong-source Work cannot be cr
 });
 
 test("one original Work lot/outcome cannot reward two generations in the same run", async () => {
-  const { improve, calls } = fixture({ read: async () => [received()] });
+  const { improve, calls } = fixture({
+    programs: [source, source + " // alternate method"],
+    read: async ({ generation }) => generation === 0
+      ? [received()]
+      : [received({ id: ni("p"), evidence: [ni("f"), ni("d"), ni("m"), ni("c")] })],
+  });
   const r = await improve(request(2));
   assert.equal(r.generations.length, 2);
   assert.equal(r.receivedWork.length, 1);
@@ -146,4 +151,12 @@ test("unaddressed candidate source cannot become received Work and records exact
   assert.equal(r.promotion, null);
   assert.equal(calls.reads.length, 0);
   assert.equal(r.generations[0].residues[0].disposition, "original-work-source-refused");
+});
+
+test("an unchanged candidate is not a method improvement even when Work was once accepted", async () => {
+  const { improve, calls } = fixture({ read: async () => [received()] });
+  const r = await improve(request(2));
+  assert.equal(r.receivedWork.length, 1);
+  assert.equal(r.generations[1].residues[0].disposition, "unchanged-strategy-cannot-improve-itself");
+  assert.equal(calls.reads.length, 1, "do not reread work for identical old and new strategies");
 });
