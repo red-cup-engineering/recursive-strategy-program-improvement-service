@@ -1,9 +1,9 @@
 {
   "name": "@red-cup-engineering/recursive-strategy-program-improvement-service",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
-  "description": "Runs a bounded generate-assay-replay-tournament-review lineage loop that can promote only witnessed paper strategy programs.",
+  "description": "Bounded paper strategy evolution through source-native original Work receiving, not self-awarded experimental scores.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/red-cup-engineering/recursive-strategy-program-improvement-service.git"
