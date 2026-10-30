@@ -16,26 +16,26 @@ const received = (overrides = {}) => ({
   id: ni("h"), source: "work-discharge", lot: ni("e"), delivery: ni("g"),
   provider: "urn:producer", judge: "urn:assayer",
   verdict: "accepted", at: "2026-10-29T01:00:00Z",
-  evidence: [ni("f"), ni("d")],
+  evidence: [ni("f"), ni("d"), ni("a"), ni("c")],
   receivingReceipt: ni("j"), receivingAuthorizationReceipt: ni("k"),
   reportedResult: { kind: "skill-result", value: { tested: true } },
   ...overrides,
 });
-function fixture({ read = async () => [], approval = true, winner = true } = {}) {
+function fixture({ read = async () => [], approval = true, winner = true, reviewerActor = "urn:reviewer:other", assaySource = ni("d") } = {}) {
   const calls = { reads: [], promotions: [], generations: [] };
   const providers = {
     synthesizePopulation: async () => ({
       candidates: [{ index: 0, provider: "urn:author:one", candidate: { strategySource: source } }],
       residues: [],
     }),
-    assayProgram: async () => ({ type: "StrategyProgramStaticAssay", source: ni("d"), admitted: true }),
+    assayProgram: async () => ({ type: "StrategyProgramStaticAssay", source: assaySource, admitted: true }),
     replayProgram: async () => ({ type: "DeterministicStrategyProgramReplay", output: { scores: { BLK: 1 } } }),
     evaluateProgram: async () => ({ type: "PurgedMultiRegimeEvaluation", holdoutScore: 1 }),
     selectTournamentWinner: async () => ({
       type: "GeneratedStrategyTournamentResult", improvementEstablished: winner,
       ...(winner ? { winnerIndex: 0 } : {}),
     }),
-    reviewProgram: async () => ({ approved: approval, reviewerActor: "urn:reviewer:other" }),
+    reviewProgram: async () => ({ approved: approval, reviewerActor }),
     readStandingOutcomes: async args => { calls.reads.push(args); return read(args); },
     recordGeneration: async value => { calls.generations.push(value); return { id: `urn:generation:${value.generation}` }; },
     promotePaperProgram: async args => {
@@ -81,8 +81,10 @@ test("revoked, contested, self-judged, failed and wrong-source Work cannot be cr
   const negatives = [
     ["rejected", received({ verdict: "rejected" }), "unqualified-original-work"],
     ["voided", received({ verdict: "voided" }), "unqualified-original-work"],
-    ["wrong-source", received({ evidence: [ni("f"), ni("z")] }), "original-work-not-received"],
-    ["wrong-Work", received({ evidence: [ni("y"), ni("d")] }), "original-work-not-received"],
+    ["wrong-source", received({ evidence: [ni("f"), ni("z"), ni("a"), ni("c")] }), "original-work-not-received"],
+    ["wrong-Work", received({ evidence: [ni("y"), ni("d"), ni("a"), ni("c")] }), "original-work-not-received"],
+    ["wrong-incumbent", received({ evidence: [ni("f"), ni("d"), ni("y"), ni("c")] }), "original-work-not-received"],
+    ["wrong-comparator-suite", received({ evidence: [ni("f"), ni("d"), ni("a"), ni("y")] }), "original-work-not-received"],
     ["self-judged", received({ judge: "urn:producer" }), "unqualified-original-work"],
     ["author-judged", received({ judge: "urn:author:one" }), "unqualified-original-work"],
     ["no independent receiver", received({ receivingAuthorizationReceipt: undefined }), "unqualified-original-work"],
@@ -122,7 +124,7 @@ test("unavailable or malformed upstream Work reads fail closed without making a 
 });
 
 test("review refusal or unselected candidate never uses Work results to mint success", async () => {
-  for (const opts of [{ approval: false }, { winner: false }]) {
+  for (const opts of [{ approval: false }, { winner: false }, { reviewerActor: "" }, { reviewerActor: "urn:author:one" }]) {
     const { improve, calls } = fixture({ ...opts, read: async () => [received()] });
     const r = await improve(request());
     assert.equal(r.lineageHead, ni("a"));
@@ -135,4 +137,13 @@ test("original Work is mandatory and the original source reader port cannot be o
   assert.throws(() => createRecursiveStrategyProgramImprovement({}), /explicit-evolution-providers-required/);
   const { improve } = fixture();
   return assert.rejects(improve({ ...request(), originalWork: undefined }), /immutable-evolution-inputs-required/);
+});
+
+test("unaddressed candidate source cannot become received Work and records exact refusal", async () => {
+  const { improve, calls } = fixture({ assaySource: "arbitrary caller string", read: async () => [received()] });
+  const r = await improve(request());
+  assert.equal(r.lineageHead, ni("a"));
+  assert.equal(r.promotion, null);
+  assert.equal(calls.reads.length, 0);
+  assert.equal(r.generations[0].residues[0].disposition, "original-work-source-refused");
 });
