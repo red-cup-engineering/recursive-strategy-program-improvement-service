@@ -110,7 +110,9 @@ export function createRecursiveStrategyProgramImprovement(providers) {
           // Do not build a second outcome ledger or infer Work discharge from
           // mere approval of a producer's result.
           let qualified;
-          try {
+          if (winner.assay.source === incumbent.id) {
+            qualified = { refusal: "unchanged-strategy-cannot-improve-itself" };
+          } else try {
             if (!NI.test(winner.assay.source)) throw new TypeError("unaddressed-strategy-source");
             const standing = await providers.readStandingOutcomes({
               originalWork: request.originalWork, candidateSource: winner.assay.source,
